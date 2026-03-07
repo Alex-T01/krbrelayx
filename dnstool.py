@@ -30,16 +30,16 @@ import getpass
 import re
 import os
 import socket
-from struct import unpack, pack
+from struct import unpack
 from impacket.structure import Structure
 from impacket.krb5.ccache import CCache
 from impacket.krb5.kerberosv5 import getKerberosTGT, getKerberosTGS
 from impacket.krb5.types import Principal
 from impacket.krb5 import constants
-from ldap3 import NTLM, Server, Connection, ALL, LEVEL, BASE, MODIFY_DELETE, MODIFY_ADD, MODIFY_REPLACE, SASL, KERBEROS
+from ldap3 import NTLM, Server, Connection, ALL, LEVEL, BASE, MODIFY_DELETE, MODIFY_ADD, MODIFY_REPLACE, SASL, KERBEROS, ENCRYPT, TLS_CHANNEL_BINDING, Tls
+from ssl import CERT_NONE
 from lib.utils.kerberos import ldap_kerberos
 import ldap3
-from impacket.ldap import ldaptypes
 import dns.resolver
 import datetime
 
@@ -354,6 +354,8 @@ def main():
     parser.add_argument('-dns-ip', action="store", metavar="ip address", help='IP Address of a DNS Server')
     parser.add_argument('-aesKey', action="store", metavar="hex key", help='AES key to use for Kerberos Authentication '
                                                                           '(128 or 256 bits)')
+    parser.add_argument('-scheme', action="store", metavar="scheme", default="ldap", help='LDAP scheme to use (ldap or ldaps)')
+    parser.add_argument('-n', action="store_false", default=True, help='No LDAP encryption')
     recordopts = parser.add_argument_group("Record options")
     recordopts.add_argument("-r", "--record", type=str, metavar='TARGETRECORD', help="Record to target (FQDN)")
     recordopts.add_argument("-a",
@@ -372,6 +374,7 @@ def main():
 
 
     args = parser.parse_args()
+    enableEncryption = True
 
     #Prompt for password if not set
     authentication = None
@@ -421,18 +424,44 @@ def main():
         authentication = SASL
         sasl_mech = KERBEROS
 
+    if args.n is not None:
+        enableEncryption = args.n
+
     # define the server and the connection
-    s = Server(args.host, port=args.port, use_ssl=args.force_ssl, get_info=ALL)
+    if args.scheme == "ldap":
+        s = Server(args.host, port=args.port, use_ssl=args.force_ssl, get_info=ALL)
+    elif args.scheme == "ldaps":
+        tls = ldap3.Tls(validate=CERT_NONE)
+        s = Server(args.host, port=636, use_ssl=True, get_info=ALL, tls=tls, allowed_referral_hosts=[("*",True)])
+    else:
+        print_f('Invalid scheme')
+        sys.exit(1)
+
     print_m('Connecting to host...')
-    c = Connection(s, user=args.user, password=args.password, authentication=authentication, sasl_mechanism=sasl_mech)
-    print_m('Binding to host')
+
     # perform the Bind operation
     if authentication == NTLM:
+        if enableEncryption:
+            if args.scheme == "ldap":
+                c = Connection(s, user=args.user, password=args.password, authentication=authentication, sasl_mechanism=sasl_mech, session_security=ENCRYPT)
+            else:
+                c = Connection(s, user=args.user, password=args.password, authentication=authentication, sasl_mechanism=sasl_mech, channel_binding=TLS_CHANNEL_BINDING)
+        else:
+            c = Connection(s, user=args.user, password=args.password, authentication=authentication, sasl_mechanism=sasl_mech)
+
+        print_m('Binding to host')
         if not c.bind():
             print_f('Could not bind with specified credentials')
             print_f(c.result)
             sys.exit(1)
     else:
+        if args.scheme == "ldap":
+            if enableEncryption:
+                c = Connection(s, user=args.user, password=args.password, authentication=authentication, sasl_mechanism=sasl_mech, session_security=ENCRYPT)
+            else:
+                c = Connection(s, user=args.user, password=args.password, authentication=authentication, sasl_mechanism=sasl_mech)
+        elif args.scheme == "ldaps":
+            c = Connection(s, user=args.user, password=args.password, authentication=authentication, sasl_mechanism=sasl_mech)
         ldap_kerberos(domain, kdcHost, None, userName, c, args.host, TGS)
     print_o('Bind OK')
     domainroot = s.info.other['defaultNamingContext'][0]
@@ -480,7 +509,15 @@ def main():
 
 
     searchtarget = 'DC=%s,%s' % (zone, dnsroot)
-    # print s.info.naming_contexts
+    # First search for the entry in case ACE does not allow retrieving attributes
+    # If the attribute of an entry cannot be retrieven, then, the objectClass filter
+    # will not work properly
+    if args.action == 'query':
+        entrywithoutfilter = None
+        c.search(searchtarget, '(objectClass=*)', attributes=None)
+        for entry in c.response:
+            if entry['dn'].startswith(f'DC={target}'):
+                entrywithoutfilter = entry
     c.search(searchtarget, '(&(objectClass=dnsNode)(name=%s))' % ldap3.utils.conv.escape_filter_chars(target), attributes=['dnsRecord','dNSTombstoned','name'])
     targetentry = None
     for entry in c.response:
@@ -492,9 +529,12 @@ def main():
     if args.action in ['add', 'modify', 'remove'] and not args.data:
         print_f('This operation requires you to specify record data with --data')
         return
-    
+
 
     # Check if we need the target record to exists, and if yes if it does
+    if args.action == 'query' and not targetentry and entrywithoutfilter:
+        print_o('Record found but no rights to list attributes')
+        return
     if args.action in ['modify', 'remove', 'ldapdelete', 'resurrect', 'query'] and not targetentry:
         print_f('Target record not found!')
         return
