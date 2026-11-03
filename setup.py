@@ -12,13 +12,12 @@ setup(
     packages=find_packages(),
     include_package_data=True,
     install_requires=[
-        'impacket>=0.9.21',  # assuming krbrelayx relies on Impacket, similar to other tools in the same domain
+        'impacket>=0.9.21',
         'ldap3',
-        'flask',  # only include if the project has a web component or similar functionality requiring flask
+        'ldap3-ad-auth',
         'dnspython',
-        'setuptools',
         'pycryptodome',
-        # add other dependencies as necessary
+        'six',
     ],
     scripts=[
         'addspn.py',
