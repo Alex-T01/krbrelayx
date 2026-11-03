@@ -36,9 +36,8 @@ from impacket.krb5.ccache import CCache
 from impacket.krb5.kerberosv5 import getKerberosTGT, getKerberosTGS
 from impacket.krb5.types import Principal
 from impacket.krb5 import constants
-from ldap3 import NTLM, Server, Connection, ALL, LEVEL, BASE, MODIFY_DELETE, MODIFY_ADD, MODIFY_REPLACE, SASL, KERBEROS, ENCRYPT, TLS_CHANNEL_BINDING, Tls
-from ssl import CERT_NONE
-from lib.utils.kerberos import ldap_kerberos
+from ldap3 import NTLM, Server, Connection, ALL, LEVEL, BASE, MODIFY_DELETE, MODIFY_ADD, MODIFY_REPLACE, SASL, KERBEROS
+from ldap3_ad_auth import bind_kerberos, bind_ntlm
 import ldap3
 import dns.resolver
 import datetime
@@ -354,8 +353,6 @@ def main():
     parser.add_argument('-dns-ip', action="store", metavar="ip address", help='IP Address of a DNS Server')
     parser.add_argument('-aesKey', action="store", metavar="hex key", help='AES key to use for Kerberos Authentication '
                                                                           '(128 or 256 bits)')
-    parser.add_argument('-scheme', action="store", metavar="scheme", default="ldap", help='LDAP scheme to use (ldap or ldaps)')
-    parser.add_argument('-n', action="store_false", default=True, help='No LDAP encryption')
     recordopts = parser.add_argument_group("Record options")
     recordopts.add_argument("-r", "--record", type=str, metavar='TARGETRECORD', help="Record to target (FQDN)")
     recordopts.add_argument("-a",
@@ -364,7 +361,8 @@ def main():
                         default='query',
                         help="Action to perform. Options: add (add a new record), modify ("
                              "modify an existing record), query (show existing), remove (mark record "
-                             "for cleanup from DNS cache), delete (delete from LDAP). Default: query"
+                             "for cleanup from DNS cache), resurrect (resurrect a tombstoned record), "
+                             "ldapdelete (delete from LDAP). Default: query"
                         )
     recordopts.add_argument("-t", "--type", choices=['A'], default='A', help="Record type to add (Currently only A records supported)")
     recordopts.add_argument("-d", "--data", metavar='RECORDDATA', help="Record data (IP address)")
@@ -374,7 +372,6 @@ def main():
 
 
     args = parser.parse_args()
-    enableEncryption = True
 
     #Prompt for password if not set
     authentication = None
@@ -424,45 +421,22 @@ def main():
         authentication = SASL
         sasl_mech = KERBEROS
 
-    if args.n is not None:
-        enableEncryption = args.n
-
     # define the server and the connection
-    if args.scheme == "ldap":
-        s = Server(args.host, port=args.port, use_ssl=args.force_ssl, get_info=ALL)
-    elif args.scheme == "ldaps":
-        tls = ldap3.Tls(validate=CERT_NONE)
-        s = Server(args.host, port=636, use_ssl=True, get_info=ALL, tls=tls, allowed_referral_hosts=[("*",True)])
-    else:
-        print_f('Invalid scheme')
-        sys.exit(1)
+    s = Server(args.host, port=args.port, use_ssl=args.force_ssl, get_info=ALL)
 
     print_m('Connecting to host...')
-
+    c = Connection(s, user=args.user, password=args.password, authentication=authentication, sasl_mechanism=sasl_mech, auto_referrals=False)
+    print_m('Binding to host')
     # perform the Bind operation
     if authentication == NTLM:
-        if enableEncryption:
-            if args.scheme == "ldap":
-                c = Connection(s, user=args.user, password=args.password, authentication=authentication, sasl_mechanism=sasl_mech, session_security=ENCRYPT)
-            else:
-                c = Connection(s, user=args.user, password=args.password, authentication=authentication, sasl_mechanism=sasl_mech, channel_binding=TLS_CHANNEL_BINDING)
-        else:
-            c = Connection(s, user=args.user, password=args.password, authentication=authentication, sasl_mechanism=sasl_mech)
-
-        print_m('Binding to host')
-        if not c.bind():
+        try:
+            bind_ntlm(c, domain=domain, username=user, password=args.password)
+        except Exception:
             print_f('Could not bind with specified credentials')
             print_f(c.result)
             sys.exit(1)
     else:
-        if args.scheme == "ldap":
-            if enableEncryption:
-                c = Connection(s, user=args.user, password=args.password, authentication=authentication, sasl_mechanism=sasl_mech, session_security=ENCRYPT)
-            else:
-                c = Connection(s, user=args.user, password=args.password, authentication=authentication, sasl_mechanism=sasl_mech)
-        elif args.scheme == "ldaps":
-            c = Connection(s, user=args.user, password=args.password, authentication=authentication, sasl_mechanism=sasl_mech)
-        ldap_kerberos(domain, kdcHost, None, userName, c, args.host, TGS)
+        bind_kerberos(c, domain=domain, kdc=kdcHost, username=user, hostname=args.host, tgs=TGS)
     print_o('Bind OK')
     domainroot = s.info.other['defaultNamingContext'][0]
     forestroot = s.info.other['rootDomainNamingContext'][0]
